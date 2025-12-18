@@ -3,7 +3,7 @@ import google.generativeai as genai
 import pandas as pd
 import io
 import os
-import pypdf  # UPDATED: Works better with Python 3.13
+import pypdf
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
@@ -15,28 +15,21 @@ st.set_page_config(
 
 # --- 2. CONSTANTS ---
 BASE_RULES_FILE = "A2013-18.pdf"
+# We selected this from your available list
+MODEL_ID = "gemini-2.5-flash" 
 
 # --- 3. HELPER FUNCTIONS ---
 
-def get_best_available_model(api_key):
+def get_model(api_key):
     """
-    Auto-detects the best model to prevent 404 Errors.
+    Connects using the specific model we know you have access to.
     """
     genai.configure(api_key=api_key)
     try:
-        # Check what models your API key actually has access to
-        models = genai.list_models()
-        available_names = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
-        
-        # Priority Logic: Try Flash -> Pro -> Fallback
-        for name in available_names:
-            if "gemini-1.5-flash" in name: return genai.GenerativeModel(name)
-        for name in available_names:
-            if "gemini-1.5-pro" in name: return genai.GenerativeModel(name)
-        
-        return genai.GenerativeModel('gemini-pro') # Fallback
-    except:
-        return genai.GenerativeModel('gemini-pro')
+        return genai.GenerativeModel(MODEL_ID)
+    except Exception as e:
+        st.error(f"Error configuring model: {e}")
+        return None
 
 @st.cache_resource
 def load_base_rules_text():
@@ -46,10 +39,10 @@ def load_base_rules_text():
     try:
         text = ""
         with open(BASE_RULES_FILE, "rb") as f:
-            pdf_reader = pypdf.PdfReader(f) # Using pypdf
-            # Limit pages to prevent memory crash on Cloud Free Tier
+            pdf_reader = pypdf.PdfReader(f)
+            # Limit pages to 200 (Gemini 2.5 Flash has a huge context window, so we can read more)
             for i, page in enumerate(pdf_reader.pages):
-                if i > 150: break 
+                if i > 200: break 
                 text += page.extract_text() + "\n"
         return text, "✅ Companies Act, 2013 Loaded."
     except Exception as e:
@@ -59,7 +52,7 @@ def extract_text_from_uploaded_pdfs(uploaded_files):
     combined_text = ""
     for pdf_file in uploaded_files:
         try:
-            pdf_reader = pypdf.PdfReader(pdf_file) # Using pypdf
+            pdf_reader = pypdf.PdfReader(pdf_file)
             for page in pdf_reader.pages:
                 combined_text += page.extract_text() + "\n"
         except Exception as e:
@@ -72,40 +65,46 @@ def clean_csv_output(text):
     return "\n".join([line for line in lines if "," in line])
 
 def generate_compliance_checklist(company_type, base_text, extra_text, api_key):
-    model = get_best_available_model(api_key)
+    model = get_model(api_key)
+    if not model: return "Error: Model configuration failed."
     
-    # Limit context to be safe with Token Limits on smaller models
-    safe_context = (base_text + "\n\n" + extra_text)[:30000] 
+    # Gemini 2.5 Flash can handle very large text, so we increase the limit
+    safe_context = (base_text + "\n\n" + extra_text)[:80000] 
 
     prompt = f"""
-    Act as a Company Secretary in India.
+    Act as a Senior Company Secretary in India.
     User Context: **{company_type}** Company.
     
-    Knowledge Base:
+    Knowledge Base (Companies Act 2013):
     {safe_context}
     
     TASK: Generate a Yearly Compliance Checklist for {company_type}.
     
     LOGIC:
-    1. Private: Check exemptions.
-    2. Listed: Apply SEBI rules.
+    1. If Private: Check for exemptions (Sec 185/173).
+    2. If Listed: Apply SEBI LODR rules strictly.
     
     OUTPUT:
-    1. Strategy Summary.
-    2. CSV Table (Headers: "Month","Activity","Section","Frequency","Risk")
+    1. Strategy Summary (Bullet points).
+    2. CSV Table (Strictly Comma Separated).
+       Headers: "Month","Activity","Section","Frequency","Risk"
     """
     
     try:
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"Error: {e}"
+        return f"Generation Error: {e}"
 
-# --- 4. MAIN APP UI ---
+# --- 4. MAIN UI ---
 
 with st.sidebar:
     st.header("⚙️ Settings")
     api_key = st.text_input("🔑 Gemini API Key", type="password")
+    
+    st.success(f"Target Model: {MODEL_ID}")
+    
+    st.markdown("---")
     st.header("🏢 Company")
     company_type = st.radio("Type:", ["Private Limited", "Public (Unlisted)", "Listed (BSE/NSE)"])
 
@@ -131,7 +130,7 @@ with col2:
         if not api_key:
             st.error("Enter API Key")
         else:
-            with st.spinner("Analyzing..."):
+            with st.spinner(f"Analyzing with {MODEL_ID}..."):
                 extra = extract_text_from_uploaded_pdfs(uploaded_files) if uploaded_files else ""
                 res = generate_compliance_checklist(company_type, base_text, extra, api_key)
                 
@@ -142,6 +141,9 @@ with col2:
                     csv_data = "Month" + parts[1].replace("```","")
                     clean = clean_csv_output(csv_data)
                     st.dataframe(pd.read_csv(io.StringIO(clean)), use_container_width=True)
+                    
+                    csv_bytes = clean.encode('utf-8')
+                    st.download_button("💾 Download CSV", csv_bytes, "compliance.csv", "text/csv")
 
 st.divider()
 st.subheader("💬 Ask a Legal Question")
@@ -149,15 +151,16 @@ user_query = st.text_input("e.g., 'Can we give a loan to a Director?'")
 
 if user_query and api_key:
     if st.button("Consult the Act"):
-        model = get_best_available_model(api_key)
+        model = get_model(api_key)
         extra_context = extract_text_from_uploaded_pdfs(uploaded_files) if uploaded_files else ""
-        safe_context = (base_text + extra_context)[:25000]
+        safe_context = (base_text + extra_context)[:50000]
         
         q_prompt = f"""
         Role: Company Secretary.
         User: {company_type} Company.
         Context: {safe_context}
         Question: "{user_query}"
+        Answer with Section references.
         """
         
         with st.spinner("Searching..."):
