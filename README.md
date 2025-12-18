@@ -8,7 +8,3 @@ An intelligent compliance assistant for Indian Corporate Law, built with **Strea
 * **Legal Q&A:** Answers specific queries by referencing the uploaded **Companies Act, 2013**.
 * **RAG Architecture:** Uses Retrieval Augmented Generation to ground answers in actual legal text.
 
-## 🛠️ How to Run
-1. Clone the repo:
-   ```bash
-   git clone [https://github.com/your-username/AI-Company-Secretary-India.git](https://github.com/your-username/AI-Company-Secretary-India.git)
