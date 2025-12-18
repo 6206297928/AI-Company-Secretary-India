@@ -15,15 +15,11 @@ st.set_page_config(
 
 # --- 2. CONSTANTS ---
 BASE_RULES_FILE = "A2013-18.pdf"
-# We selected this from your available list
 MODEL_ID = "gemini-2.5-flash" 
 
 # --- 3. HELPER FUNCTIONS ---
 
 def get_model(api_key):
-    """
-    Connects using the specific model we know you have access to.
-    """
     genai.configure(api_key=api_key)
     try:
         return genai.GenerativeModel(MODEL_ID)
@@ -40,7 +36,7 @@ def load_base_rules_text():
         text = ""
         with open(BASE_RULES_FILE, "rb") as f:
             pdf_reader = pypdf.PdfReader(f)
-            # Limit pages to 200 (Gemini 2.5 Flash has a huge context window, so we can read more)
+            # Limit pages to 200
             for i, page in enumerate(pdf_reader.pages):
                 if i > 200: break 
                 text += page.extract_text() + "\n"
@@ -60,15 +56,22 @@ def extract_text_from_uploaded_pdfs(uploaded_files):
     return combined_text
 
 def clean_csv_output(text):
+    """
+    Robust cleaning to prevent ParserError.
+    """
+    # 1. Remove Markdown code blocks
     text = text.replace("```csv", "").replace("```", "").strip()
+    
+    # 2. Filter out empty lines or lines without commas
     lines = text.split('\n')
-    return "\n".join([line for line in lines if "," in line])
+    valid_lines = [line for line in lines if "," in line and len(line.strip()) > 5]
+    
+    return "\n".join(valid_lines)
 
 def generate_compliance_checklist(company_type, base_text, extra_text, api_key):
     model = get_model(api_key)
     if not model: return "Error: Model configuration failed."
     
-    # Gemini 2.5 Flash can handle very large text, so we increase the limit
     safe_context = (base_text + "\n\n" + extra_text)[:80000] 
 
     prompt = f"""
@@ -135,15 +138,27 @@ with col2:
                 res = generate_compliance_checklist(company_type, base_text, extra, api_key)
                 
                 parts = res.split("Month")
-                st.write(parts[0].replace("```csv",""))
                 
+                # Show Summary
+                if len(parts) > 0:
+                    st.write(parts[0].replace("```csv",""))
+                
+                # Show Table (With Error Protection)
                 if len(parts) > 1:
                     csv_data = "Month" + parts[1].replace("```","")
                     clean = clean_csv_output(csv_data)
-                    st.dataframe(pd.read_csv(io.StringIO(clean)), use_container_width=True)
                     
-                    csv_bytes = clean.encode('utf-8')
-                    st.download_button("💾 Download CSV", csv_bytes, "compliance.csv", "text/csv")
+                    try:
+                        # CRITICAL FIX: on_bad_lines='skip' ignores broken rows instead of crashing
+                        df = pd.read_csv(io.StringIO(clean), on_bad_lines='skip')
+                        st.dataframe(df, use_container_width=True)
+                        
+                        csv_bytes = clean.encode('utf-8')
+                        st.download_button("💾 Download CSV", csv_bytes, "compliance.csv", "text/csv")
+                    except Exception as e:
+                        st.warning("⚠️ Could not format the table perfectly, but here is the raw data:")
+                        st.code(clean)
+                        st.error(f"Technical Details: {e}")
 
 st.divider()
 st.subheader("💬 Ask a Legal Question")
