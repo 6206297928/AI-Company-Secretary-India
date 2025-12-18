@@ -3,7 +3,7 @@ import google.generativeai as genai
 import pandas as pd
 import io
 import os
-import PyPDF2
+import pypdf  # UPDATED: Works better with Python 3.13
 
 # --- 1. PAGE CONFIGURATION ---
 st.set_page_config(
@@ -18,52 +18,48 @@ BASE_RULES_FILE = "A2013-18.pdf"
 
 # --- 3. HELPER FUNCTIONS ---
 
-def get_gemini_model(api_key):
+def get_best_available_model(api_key):
     """
-    Tries to get the best available model to prevent 404 errors.
+    Auto-detects the best model to prevent 404 Errors.
     """
     genai.configure(api_key=api_key)
-    
-    # Priority list of models to try
-    models_to_try = [
-        'gemini-1.5-flash',       # Fast & Large Context
-        'gemini-1.5-flash-latest',# Alternative name
-        'gemini-1.5-pro',         # Smarter but slower
-        'gemini-pro'              # Fallback (Standard)
-    ]
-    
-    for model_name in models_to_try:
-        try:
-            model = genai.GenerativeModel(model_name)
-            # Test quickly if the model works
-            return model
-        except:
-            continue
-            
-    # If all fail, return a default safe one (usually gemini-pro works)
-    return genai.GenerativeModel('gemini-pro')
+    try:
+        # Check what models your API key actually has access to
+        models = genai.list_models()
+        available_names = [m.name for m in models if 'generateContent' in m.supported_generation_methods]
+        
+        # Priority Logic: Try Flash -> Pro -> Fallback
+        for name in available_names:
+            if "gemini-1.5-flash" in name: return genai.GenerativeModel(name)
+        for name in available_names:
+            if "gemini-1.5-pro" in name: return genai.GenerativeModel(name)
+        
+        return genai.GenerativeModel('gemini-pro') # Fallback
+    except:
+        return genai.GenerativeModel('gemini-pro')
 
 @st.cache_resource
 def load_base_rules_text():
     if not os.path.exists(BASE_RULES_FILE):
-        return None, f"❌ Critical Error: '{BASE_RULES_FILE}' not found. Please add it to your GitHub repo."
+        return None, f"❌ Critical Error: '{BASE_RULES_FILE}' not found in repo."
     
     try:
         text = ""
         with open(BASE_RULES_FILE, "rb") as f:
-            pdf_reader = PyPDF2.PdfReader(f)
-            # Limit pages for speed/memory if needed, but for Act usually fine
-            for page in pdf_reader.pages:
+            pdf_reader = pypdf.PdfReader(f) # Using pypdf
+            # Limit pages to prevent memory crash on Cloud Free Tier
+            for i, page in enumerate(pdf_reader.pages):
+                if i > 150: break 
                 text += page.extract_text() + "\n"
-        return text, "✅ Companies Act, 2013 Loaded Successfully."
+        return text, "✅ Companies Act, 2013 Loaded."
     except Exception as e:
-        return None, f"❌ Error reading base PDF: {e}"
+        return None, f"❌ Error reading PDF: {e}"
 
 def extract_text_from_uploaded_pdfs(uploaded_files):
     combined_text = ""
     for pdf_file in uploaded_files:
         try:
-            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            pdf_reader = pypdf.PdfReader(pdf_file) # Using pypdf
             for page in pdf_reader.pages:
                 combined_text += page.extract_text() + "\n"
         except Exception as e:
@@ -73,119 +69,79 @@ def extract_text_from_uploaded_pdfs(uploaded_files):
 def clean_csv_output(text):
     text = text.replace("```csv", "").replace("```", "").strip()
     lines = text.split('\n')
-    clean_lines = [line for line in lines if "," in line]
-    return "\n".join(clean_lines)
+    return "\n".join([line for line in lines if "," in line])
 
 def generate_compliance_checklist(company_type, base_text, extra_text, api_key):
-    # Use the robust model getter
-    model = get_gemini_model(api_key)
-
-    full_knowledge_base = base_text + "\n\n" + extra_text
+    model = get_best_available_model(api_key)
+    
+    # Limit context to be safe with Token Limits on smaller models
+    safe_context = (base_text + "\n\n" + extra_text)[:30000] 
 
     prompt = f"""
-    ### ROLE
-    You are an expert Company Secretary (CS) in India.
+    Act as a Company Secretary in India.
+    User Context: **{company_type}** Company.
     
-    ### USER CONTEXT
-    The user represents a **{company_type}** Company.
+    Knowledge Base:
+    {safe_context}
     
-    ### SOURCE OF TRUTH
-    Use the following text (Companies Act/Rules) as your strict knowledge base:
-    {full_knowledge_base[:60000]} 
+    TASK: Generate a Yearly Compliance Checklist for {company_type}.
     
-    ### TASK
-    Generate a **Yearly Compliance Checklist** specifically for a **{company_type}** Company.
+    LOGIC:
+    1. Private: Check exemptions.
+    2. Listed: Apply SEBI rules.
     
-    ### LOGIC (TRIAGE)
-    1. **Private Limited:** Check for exemptions (Sec 185, 173).
-    2. **Public (Unlisted):** Strict Companies Act rules.
-    3. **Listed:** Companies Act + SEBI LODR requirements.
-    
-    ### OUTPUT FORMAT
-    1. **Executive Summary**: Brief strategy notes.
-    2. **The Checklist Table (CSV Only)**:
-       Headers: "Month/Trigger","Form/Activity","Section/Rule","Frequency","Penalty Risk"
-       Example: "September 30","File AOC-4","Section 137","Yearly","High"
+    OUTPUT:
+    1. Strategy Summary.
+    2. CSV Table (Headers: "Month","Activity","Section","Frequency","Risk")
     """
     
     try:
         response = model.generate_content(prompt)
         return response.text
     except Exception as e:
-        return f"Error calling Gemini: {e}"
+        return f"Error: {e}"
 
 # --- 4. MAIN APP UI ---
 
 with st.sidebar:
     st.header("⚙️ Settings")
     api_key = st.text_input("🔑 Gemini API Key", type="password")
-    
-    st.markdown("---")
-    st.header("🏢 Company Profile")
-    company_type = st.radio(
-        "Structure:",
-        ["Private Limited", "Public (Unlisted)", "Listed (BSE/NSE)"],
-        index=0
-    )
+    st.header("🏢 Company")
+    company_type = st.radio("Type:", ["Private Limited", "Public (Unlisted)", "Listed (BSE/NSE)"])
 
 st.title("⚖️ AI Company Secretary Agent")
-st.markdown(f"### Intelligent Compliance Manager for **{company_type}** Companies")
-st.caption("Powered by Google Gemini & RAG")
-st.divider()
+st.markdown(f"### Compliance Manager for **{company_type}**")
 
-base_rules_text, status_msg = load_base_rules_text()
-
-if "✅" in status_msg:
-    st.success(status_msg)
+# Load Data
+base_text, msg = load_base_rules_text()
+if "❌" in msg:
+    st.error(msg)
+    st.stop()
 else:
-    st.error(status_msg)
-    st.warning("⚠️ Please ensure 'A2013-18.pdf' is inside the folder.")
-    st.stop() 
+    st.success(msg)
 
 col1, col2 = st.columns([1, 2])
 
 with col1:
-    st.subheader("📂 Supplemental Knowledge")
-    st.markdown("The **Companies Act 2013** is active.")
-    st.markdown("Upload specific docs (AoA, SEBI Circulars) if needed:")
-    uploaded_files = st.file_uploader("Upload PDFs", type=['pdf'], accept_multiple_files=True)
+    st.markdown("**Docs Loaded:** Companies Act 2013")
+    uploaded_files = st.file_uploader("Upload Extra PDFs (AoA/SEBI)", type=['pdf'], accept_multiple_files=True)
 
 with col2:
-    st.subheader("🚀 Generate Report")
-    
-    if st.button("Generate Yearly Checklist", type="primary"):
+    if st.button("Generate Checklist", type="primary"):
         if not api_key:
-            st.error("❌ Please enter your Gemini API Key.")
+            st.error("Enter API Key")
         else:
-            with st.spinner("⚖️ Analyzing Company Law..."):
-                extra_text = extract_text_from_uploaded_pdfs(uploaded_files) if uploaded_files else ""
+            with st.spinner("Analyzing..."):
+                extra = extract_text_from_uploaded_pdfs(uploaded_files) if uploaded_files else ""
+                res = generate_compliance_checklist(company_type, base_text, extra, api_key)
                 
-                result = generate_compliance_checklist(company_type, base_rules_text, extra_text, api_key)
-                
-                parts = result.split("Month/Trigger") 
-                
-                st.markdown("### 📋 Executive Summary")
-                st.markdown(parts[0].replace("```csv", "").replace("```", ""))
+                parts = res.split("Month")
+                st.write(parts[0].replace("```csv",""))
                 
                 if len(parts) > 1:
-                    csv_raw = "Month/Trigger" + parts[1]
-                    clean_csv = clean_csv_output(csv_raw)
-                    
-                    try:
-                        st.markdown("### 📅 Compliance Calendar")
-                        df = pd.read_csv(io.StringIO(clean_csv))
-                        st.dataframe(df, use_container_width=True)
-                        
-                        csv_bytes = df.to_csv(index=False).encode('utf-8')
-                        st.download_button(
-                            "💾 Download CSV",
-                            csv_bytes,
-                            f"Compliance_{company_type.replace(' ','_')}.csv",
-                            "text/csv"
-                        )
-                    except:
-                        st.error("Table formatting issue. See raw output below.")
-                        st.code(clean_csv)
+                    csv_data = "Month" + parts[1].replace("```","")
+                    clean = clean_csv_output(csv_data)
+                    st.dataframe(pd.read_csv(io.StringIO(clean)), use_container_width=True)
 
 st.divider()
 st.subheader("💬 Ask a Legal Question")
@@ -193,18 +149,15 @@ user_query = st.text_input("e.g., 'Can we give a loan to a Director?'")
 
 if user_query and api_key:
     if st.button("Consult the Act"):
-        model = get_gemini_model(api_key)
-        
+        model = get_best_available_model(api_key)
         extra_context = extract_text_from_uploaded_pdfs(uploaded_files) if uploaded_files else ""
+        safe_context = (base_text + extra_context)[:25000]
         
         q_prompt = f"""
-        Act as a strict Company Secretary for a **{company_type}** company.
-        Using the Companies Act 2013:
-        {base_rules_text[:50000]}
-        {extra_context[:10000]}
-        
+        Role: Company Secretary.
+        User: {company_type} Company.
+        Context: {safe_context}
         Question: "{user_query}"
-        Answer with Section references.
         """
         
         with st.spinner("Searching..."):
